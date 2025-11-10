@@ -1,0 +1,318 @@
+import kagglehub
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage.feature import hog
+from skimage import exposure
+from sklearn.svm import SVC
+from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+import seaborn as sns
+import os
+
+# =====================================================
+# 1. DOWNLOAD DATASET DARI KAGGLE
+# =====================================================
+print("="*60)
+print("DOWNLOADING EMNIST DATASET FROM KAGGLE")
+print("="*60)
+
+path = kagglehub.dataset_download("crawford/emnist")
+print(f"\nPath to dataset files: {path}")
+
+# List semua file dalam folder dataset
+print("\nFile yang tersedia:")
+for file in os.listdir(path):
+    print(f"  - {file}")
+
+# =====================================================
+# 2. MEMBACA DATA
+# =====================================================
+# Dataset EMNIST biasanya tersedia dalam beberapa varian:
+# - emnist-byclass
+# - emnist-bymerge
+# - emnist-balanced
+# - emnist-letters
+# - emnist-digits
+# - emnist-mnist
+
+# Kita akan gunakan emnist-bymerge sebagai contoh
+print("\n" + "="*60)
+print("LOADING DATA")
+print("="*60)
+
+# Cari file CSV untuk train dan test
+train_file = os.path.join(path, 'emnist-bymerge-train.csv')
+test_file = os.path.join(path, 'emnist-bymerge-test.csv')
+
+# Jika file tidak ditemukan, coba cari file lain
+if not os.path.exists(train_file):
+    print("\nFile emnist-bymerge tidak ditemukan, mencari file alternatif...")
+    csv_files = [f for f in os.listdir(path) if f.endswith('.csv')]
+    if csv_files:
+        # Gunakan file pertama yang ditemukan
+        available_file = os.path.join(path, csv_files[0])
+        print(f"Menggunakan file: {csv_files[0]}")
+        
+        # Load data
+        data = pd.read_csv(available_file)
+        
+        # Split menjadi train dan test (80:20)
+        split_ratio = 0.8
+        split_index = int(split_ratio * len(data))
+        train_data = data[:split_index]
+        test_data = data[split_index:]
+    else:
+        raise FileNotFoundError("Tidak ada file CSV ditemukan dalam dataset!")
+else:
+    print(f"\nMembaca data training dari: {train_file}")
+    train_data = pd.read_csv(train_file)
+    
+    print(f"Membaca data testing dari: {test_file}")
+    test_data = pd.read_csv(test_file)
+
+print(f"\nTrain data shape: {train_data.shape}")
+print(f"Test data shape: {test_data.shape}")
+
+# Memisahkan label dan piksel
+y_train = train_data.iloc[:, 0].values
+X_train = train_data.iloc[:, 1:].values
+
+y_test = test_data.iloc[:, 0].values
+X_test = test_data.iloc[:, 1:].values
+
+print(f"\nJumlah sampel training: {len(X_train)}")
+print(f"Jumlah sampel testing: {len(X_test)}")
+print(f"Jumlah kelas unik: {len(np.unique(y_train))}")
+print(f"Label unik: {sorted(np.unique(y_train))}")
+
+# =====================================================
+# 3. VISUALISASI CONTOH GAMBAR
+# =====================================================
+def visualize_samples(X, y, num_samples=10):
+    """Menampilkan beberapa sampel gambar dari dataset"""
+    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
+    axes = axes.ravel()
+    
+    for i in range(num_samples):
+        image = X[i].reshape(28, 28)
+        axes[i].imshow(image, cmap='gray')
+        axes[i].set_title(f'Label: {y[i]}', fontsize=10)
+        axes[i].axis('off')
+    
+    plt.suptitle('Sampel Gambar dari Dataset EMNIST', fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.show()
+
+print("\n" + "="*60)
+print("VISUALISASI SAMPEL DATA")
+print("="*60)
+visualize_samples(X_train, y_train, num_samples=10)
+
+# =====================================================
+# 4. EKSTRAKSI DAN VISUALISASI FITUR HOG
+# =====================================================
+def visualize_hog(image_flat, label):
+    """Visualisasi HOG untuk satu gambar"""
+    image = image_flat.reshape(28, 28)
+    
+    # Ekstraksi HOG dengan visualisasi
+    fd, hog_image = hog(image, 
+                        pixels_per_cell=(8, 8), 
+                        cells_per_block=(2, 2), 
+                        visualize=True)
+    
+    # Tingkatkan kontras HOG image
+    hog_image = exposure.rescale_intensity(hog_image, in_range=(0, 10))
+    
+    # Plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+    
+    ax1.imshow(image, cmap='gray')
+    ax1.set_title(f'Gambar Asli (Label: {label})', fontsize=12)
+    ax1.axis('off')
+    
+    ax2.imshow(hog_image, cmap='gray')
+    ax2.set_title('Fitur HOG (Histogram of Oriented Gradients)', fontsize=12)
+    ax2.axis('off')
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return fd
+
+print("\nVisualisasi HOG untuk sampel pertama...")
+sample_hog_features = visualize_hog(X_train[0], y_train[0])
+print(f"Dimensi fitur HOG: {len(sample_hog_features)}")
+
+# =====================================================
+# 5. EKSTRAKSI FITUR HOG UNTUK SEMUA DATA
+# =====================================================
+def extract_hog_features(images, dataset_name=""):
+    """Ekstraksi fitur HOG untuk semua gambar"""
+    hog_features = []
+    total = len(images)
+    
+    print(f"\nMengekstraksi fitur HOG untuk {dataset_name}...")
+    for i, image in enumerate(images):
+        if (i + 1) % 5000 == 0 or i == 0:
+            progress = (i + 1) / total * 100
+            print(f"  Progress: {i + 1}/{total} ({progress:.1f}%)")
+        
+        image = image.reshape(28, 28)
+        feature = hog(image, 
+                     pixels_per_cell=(8, 8), 
+                     cells_per_block=(2, 2), 
+                     visualize=False)
+        hog_features.append(feature)
+    
+    print(f"  ✓ Selesai! Shape: {np.array(hog_features).shape}")
+    return np.array(hog_features)
+
+print("\n" + "="*60)
+print("EKSTRAKSI FITUR HOG")
+print("="*60)
+
+X_train_hog = extract_hog_features(X_train, "data training")
+X_test_hog = extract_hog_features(X_test, "data testing")
+
+# =====================================================
+# 6. TRAINING MODEL SVM
+# =====================================================
+print("\n" + "="*60)
+print("TRAINING MODEL SVM")
+print("="*60)
+
+# Untuk dataset besar, kita bisa batasi jumlah data training
+# untuk mempercepat proses (opsional)
+USE_SUBSET = False  # Set True jika ingin menggunakan subset data
+SUBSET_SIZE = 10000
+
+if USE_SUBSET and len(X_train_hog) > SUBSET_SIZE:
+    print(f"\nMenggunakan subset {SUBSET_SIZE} sampel untuk training...")
+    indices = np.random.choice(len(X_train_hog), SUBSET_SIZE, replace=False)
+    X_train_hog_subset = X_train_hog[indices]
+    y_train_subset = y_train[indices]
+else:
+    X_train_hog_subset = X_train_hog
+    y_train_subset = y_train
+
+print(f"\nJumlah data training: {len(X_train_hog_subset)}")
+print(f"Jumlah data testing: {len(X_test_hog)}")
+
+print("\nMembangun model SVM dengan kernel linear...")
+model = make_pipeline(
+    StandardScaler(), 
+    SVC(kernel='linear', C=1.0, verbose=True)
+)
+
+print("\nMemulai training... (ini mungkin memakan waktu beberapa menit)")
+model.fit(X_train_hog_subset, y_train_subset)
+print("\n✓ Training selesai!")
+
+# =====================================================
+# 7. EVALUASI MODEL
+# =====================================================
+print("\n" + "="*60)
+print("EVALUASI MODEL")
+print("="*60)
+
+print("\nMelakukan prediksi pada data test...")
+y_pred = model.predict(X_test_hog)
+
+# Akurasi
+accuracy = accuracy_score(y_test, y_pred)
+print(f"\n{'='*60}")
+print(f"AKURASI MODEL: {accuracy * 100:.2f}%")
+print(f"{'='*60}")
+
+# Classification Report
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred, zero_division=0))
+
+# Confusion Matrix
+print("\nMembuat Confusion Matrix...")
+cm = confusion_matrix(y_test, y_pred)
+
+plt.figure(figsize=(14, 12))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True, 
+            square=True, linewidths=0.5)
+plt.title('Confusion Matrix - EMNIST HOG + SVM Classifier', fontsize=14, pad=20)
+plt.ylabel('True Label', fontsize=12)
+plt.xlabel('Predicted Label', fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# =====================================================
+# 8. VISUALISASI HASIL PREDIKSI
+# =====================================================
+def visualize_predictions(X_test_original, y_test, y_pred, num_samples=10):
+    """Visualisasi beberapa prediksi"""
+    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
+    axes = axes.ravel()
+    
+    for i in range(min(num_samples, len(X_test_original))):
+        image = X_test_original[i].reshape(28, 28)
+        axes[i].imshow(image, cmap='gray')
+        
+        true_label = y_test[i]
+        pred_label = y_pred[i]
+        color = 'green' if true_label == pred_label else 'red'
+        
+        axes[i].set_title(f'True: {true_label}\nPred: {pred_label}', 
+                         color=color, fontsize=10, fontweight='bold')
+        axes[i].axis('off')
+    
+    plt.suptitle('Hasil Prediksi (Hijau = Benar, Merah = Salah)', 
+                 fontsize=14, y=1.02)
+    plt.tight_layout()
+    plt.show()
+
+print("\n" + "="*60)
+print("VISUALISASI HASIL PREDIKSI")
+print("="*60)
+visualize_predictions(X_test, y_test, y_pred, num_samples=10)
+
+# =====================================================
+# 9. ANALISIS ERROR
+# =====================================================
+print("\n" + "="*60)
+print("ANALISIS ERROR")
+print("="*60)
+
+# Temukan prediksi yang salah
+incorrect_indices = np.where(y_test != y_pred)[0]
+print(f"\nJumlah prediksi salah: {len(incorrect_indices)}")
+print(f"Persentase error: {len(incorrect_indices)/len(y_test)*100:.2f}%")
+
+if len(incorrect_indices) > 0:
+    print("\nMenampilkan 10 contoh prediksi yang salah...")
+    num_errors_to_show = min(10, len(incorrect_indices))
+    
+    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
+    axes = axes.ravel()
+    
+    for i in range(num_errors_to_show):
+        idx = incorrect_indices[i]
+        image = X_test[idx].reshape(28, 28)
+        axes[i].imshow(image, cmap='gray')
+        axes[i].set_title(f'True: {y_test[idx]}\nPred: {y_pred[idx]}', 
+                         color='red', fontsize=10, fontweight='bold')
+        axes[i].axis('off')
+    
+    plt.suptitle('Contoh Prediksi yang Salah', fontsize=14, y=1.02, color='red')
+    plt.tight_layout()
+    plt.show()
+
+print("\n" + "="*60)
+print("✓ PROGRAM SELESAI!")
+print("="*60)
+
+# Informasi tambahan
+print("\nRingkasan:")
+print(f"  • Total data training: {len(X_train)}")
+print(f"  • Total data testing: {len(X_test)}")
+print(f"  • Jumlah kelas: {len(np.unique(y_train))}")
+print(f"  • Dimensi fitur HOG: {X_train_hog.shape[1]}")
+print(f"  • Akurasi model: {accuracy * 100:.2f}%")
