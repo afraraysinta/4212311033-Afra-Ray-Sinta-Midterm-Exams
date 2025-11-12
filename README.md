@@ -1,7 +1,9 @@
 ### 4212311033_Afra Ray Sinta-MIDTERM
 
 Nama  : Afra Ray Sinta
+
 Nim   : 4212311033
+
 Kelas : Meka B Malam
 
 - Program tersebut merupakan program untuk klasifikasi tulisan tangan berdasarkan dataset EMNIST letters (26 kelas). 
