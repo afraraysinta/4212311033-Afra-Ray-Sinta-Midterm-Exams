@@ -3,316 +3,279 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from skimage.feature import hog
-from skimage import exposure
 from sklearn.svm import SVC
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import make_pipeline
+from sklearn.model_selection import LeaveOneOut
+from tqdm import tqdm
 import seaborn as sns
 import os
+import time
 
 # =====================================================
-# 1. DOWNLOAD DATASET DARI KAGGLE
+# 1. DOWNLOAD & LOAD DATASET
 # =====================================================
 print("="*60)
-print("DOWNLOADING EMNIST DATASET FROM KAGGLE")
+print("EMNIST LETTERS - HOG + SVM + LOOCV")
 print("="*60)
 
 path = kagglehub.dataset_download("crawford/emnist")
-print(f"\nPath to dataset files: {path}")
+print(f"Dataset path: {path}")
 
-# List semua file dalam folder dataset
-print("\nFile yang tersedia:")
-for file in os.listdir(path):
-    print(f"  - {file}")
+# Load data
+train_file = os.path.join(path, 'emnist-letters-train.csv')
+test_file = os.path.join(path, 'emnist-letters-test.csv')
 
-# =====================================================
-# 2. MEMBACA DATA
-# =====================================================
-# Dataset EMNIST biasanya tersedia dalam beberapa varian:
-# - emnist-byclass
-# - emnist-bymerge
-# - emnist-balanced
-# - emnist-letters
-# - emnist-digits
-# - emnist-mnist
+print(f"\nLoading training data...")
+train_data = pd.read_csv(train_file)
+print(f"Loading testing data...")
+test_data = pd.read_csv(test_file)
 
-# Kita akan gunakan emnist-bymerge sebagai contoh
-print("\n" + "="*60)
-print("LOADING DATA")
-print("="*60)
+print(f"\nTrain: {train_data.shape}, Test: {test_data.shape}")
 
-# Cari file CSV untuk train dan test
-train_file = os.path.join(path, 'emnist-bymerge-train.csv')
-test_file = os.path.join(path, 'emnist-bymerge-test.csv')
-
-# Jika file tidak ditemukan, coba cari file lain
-if not os.path.exists(train_file):
-    print("\nFile emnist-bymerge tidak ditemukan, mencari file alternatif...")
-    csv_files = [f for f in os.listdir(path) if f.endswith('.csv')]
-    if csv_files:
-        # Gunakan file pertama yang ditemukan
-        available_file = os.path.join(path, csv_files[0])
-        print(f"Menggunakan file: {csv_files[0]}")
-        
-        # Load data
-        data = pd.read_csv(available_file)
-        
-        # Split menjadi train dan test (80:20)
-        split_ratio = 0.8
-        split_index = int(split_ratio * len(data))
-        train_data = data[:split_index]
-        test_data = data[split_index:]
-    else:
-        raise FileNotFoundError("Tidak ada file CSV ditemukan dalam dataset!")
-else:
-    print(f"\nMembaca data training dari: {train_file}")
-    train_data = pd.read_csv(train_file)
-    
-    print(f"Membaca data testing dari: {test_file}")
-    test_data = pd.read_csv(test_file)
-
-print(f"\nTrain data shape: {train_data.shape}")
-print(f"Test data shape: {test_data.shape}")
-
-# Memisahkan label dan piksel
+# Pisahkan label dan features
 y_train = train_data.iloc[:, 0].values
 X_train = train_data.iloc[:, 1:].values
-
 y_test = test_data.iloc[:, 0].values
 X_test = test_data.iloc[:, 1:].values
 
-print(f"\nJumlah sampel training: {len(X_train)}")
-print(f"Jumlah sampel testing: {len(X_test)}")
-print(f"Jumlah kelas unik: {len(np.unique(y_train))}")
-print(f"Label unik: {sorted(np.unique(y_train))}")
+print(f"Training samples: {len(X_train)}, Test samples: {len(X_test)}")
+print(f"Classes: {len(np.unique(y_train))} (Labels: {np.min(y_train)}-{np.max(y_train)})")
 
 # =====================================================
-# 3. VISUALISASI CONTOH GAMBAR
+# 2. PREPROCESSING & HOG EXTRACTION
 # =====================================================
-def visualize_samples(X, y, num_samples=10):
-    """Menampilkan beberapa sampel gambar dari dataset"""
-    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
-    axes = axes.ravel()
-    
-    for i in range(num_samples):
-        image = X[i].reshape(28, 28)
-        axes[i].imshow(image, cmap='gray')
-        axes[i].set_title(f'Label: {y[i]}', fontsize=10)
-        axes[i].axis('off')
-    
-    plt.suptitle('Sampel Gambar dari Dataset EMNIST', fontsize=14, y=1.02)
-    plt.tight_layout()
-    plt.show()
-
-print("\n" + "="*60)
-print("VISUALISASI SAMPEL DATA")
-print("="*60)
-visualize_samples(X_train, y_train, num_samples=10)
-
-# =====================================================
-# 4. EKSTRAKSI DAN VISUALISASI FITUR HOG
-# =====================================================
-def visualize_hog(image_flat, label):
-    """Visualisasi HOG untuk satu gambar"""
+def preprocess_emnist_image(image_flat):
+    """Rotate dan flip EMNIST image"""
     image = image_flat.reshape(28, 28)
-    
-    # Ekstraksi HOG dengan visualisasi
-    fd, hog_image = hog(image, 
-                        pixels_per_cell=(8, 8), 
-                        cells_per_block=(2, 2), 
-                        visualize=True)
-    
-    # Tingkatkan kontras HOG image
-    hog_image = exposure.rescale_intensity(hog_image, in_range=(0, 10))
-    
-    # Plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
-    
-    ax1.imshow(image, cmap='gray')
-    ax1.set_title(f'Gambar Asli (Label: {label})', fontsize=12)
-    ax1.axis('off')
-    
-    ax2.imshow(hog_image, cmap='gray')
-    ax2.set_title('Fitur HOG (Histogram of Oriented Gradients)', fontsize=12)
-    ax2.axis('off')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    return fd
+    image = np.rot90(image)
+    image = np.fliplr(image)
+    return image
 
-print("\nVisualisasi HOG untuk sampel pertama...")
-sample_hog_features = visualize_hog(X_train[0], y_train[0])
-print(f"Dimensi fitur HOG: {len(sample_hog_features)}")
-
-# =====================================================
-# 5. EKSTRAKSI FITUR HOG UNTUK SEMUA DATA
-# =====================================================
 def extract_hog_features(images, dataset_name=""):
-    """Ekstraksi fitur HOG untuk semua gambar"""
+    """Ekstraksi HOG features"""
     hog_features = []
-    total = len(images)
+    print(f"\nEkstraksi HOG untuk {dataset_name}...")
     
-    print(f"\nMengekstraksi fitur HOG untuk {dataset_name}...")
-    for i, image in enumerate(images):
-        if (i + 1) % 5000 == 0 or i == 0:
-            progress = (i + 1) / total * 100
-            print(f"  Progress: {i + 1}/{total} ({progress:.1f}%)")
+    for i, image_flat in enumerate(images):
+        if (i + 1) % 10000 == 0:
+            print(f"  Progress: {i + 1}/{len(images)} ({(i + 1)/len(images)*100:.1f}%)")
         
-        image = image.reshape(28, 28)
-        feature = hog(image, 
-                     pixels_per_cell=(8, 8), 
-                     cells_per_block=(2, 2), 
-                     visualize=False)
+        image = preprocess_emnist_image(image_flat)
+        feature = hog(image, pixels_per_cell=(8, 8), cells_per_block=(2, 2), visualize=False)
         hog_features.append(feature)
     
-    print(f"  ✓ Selesai! Shape: {np.array(hog_features).shape}")
+    print(f"  Selesai! Shape: {np.array(hog_features).shape}")
     return np.array(hog_features)
 
 print("\n" + "="*60)
 print("EKSTRAKSI FITUR HOG")
 print("="*60)
 
-X_train_hog = extract_hog_features(X_train, "data training")
-X_test_hog = extract_hog_features(X_test, "data testing")
+X_train_hog = extract_hog_features(X_train, "training data")
+X_test_hog = extract_hog_features(X_test, "testing data")
+
+print(f"\nHOG feature dimension: {X_train_hog.shape[1]}")
 
 # =====================================================
-# 6. TRAINING MODEL SVM
+# 3. LOOCV DENGAN CHECKPOINT
 # =====================================================
 print("\n" + "="*60)
-print("TRAINING MODEL SVM")
+print("LEAVE-ONE-OUT CROSS-VALIDATION")
 print("="*60)
 
-# Untuk dataset besar, kita bisa batasi jumlah data training
-# untuk mempercepat proses (opsional)
-USE_SUBSET = False  # Set True jika ingin menggunakan subset data
-SUBSET_SIZE = 10000
+# Konfigurasi
+USE_LOOCV_SUBSET = True     # Set False untuk full dataset
+LOOCV_SUBSET_SIZE = 1000    # Ukuran subset
+BATCH_SIZE = 100             # Save checkpoint setiap 100 iterasi
+SAVE_FILE = "loocv_results_emnist_letters.csv"
 
-if USE_SUBSET and len(X_train_hog) > SUBSET_SIZE:
-    print(f"\nMenggunakan subset {SUBSET_SIZE} sampel untuk training...")
-    indices = np.random.choice(len(X_train_hog), SUBSET_SIZE, replace=False)
-    X_train_hog_subset = X_train_hog[indices]
-    y_train_subset = y_train[indices]
+# Pilih data untuk LOOCV
+if USE_LOOCV_SUBSET:
+    print(f"\n⚠️  Mode: SUBSET ({LOOCV_SUBSET_SIZE} samples)")
+    print(f"    Set USE_LOOCV_SUBSET=False untuk full dataset\n")
+    
+    from sklearn.model_selection import train_test_split
+    X_loocv, _, y_loocv, _ = train_test_split(
+        X_train_hog, y_train, 
+        train_size=LOOCV_SUBSET_SIZE, 
+        stratify=y_train,
+        random_state=42
+    )
 else:
-    X_train_hog_subset = X_train_hog
-    y_train_subset = y_train
+    print(f"\n⚠️  Mode: FULL DATASET ({len(X_train_hog)} samples)")
+    print(f"    Estimasi waktu: {len(X_train_hog) * 2 / 3600:.1f} jam\n")
+    X_loocv = X_train_hog
+    y_loocv = y_train
 
-print(f"\nJumlah data training: {len(X_train_hog_subset)}")
-print(f"Jumlah data testing: {len(X_test_hog)}")
+n_samples = X_loocv.shape[0]
+print(f"LOOCV samples: {n_samples}")
+print(f"Checkpoint file: {SAVE_FILE}")
 
-print("\nMembangun model SVM dengan kernel linear...")
-model = make_pipeline(
+# Buat model SVM
+svm_clf = make_pipeline(
     StandardScaler(), 
-    SVC(kernel='linear', C=1.0, verbose=True)
+    SVC(kernel='rbf', C=10, gamma=0.01)
 )
 
-print("\nMemulai training... (ini mungkin memakan waktu beberapa menit)")
-model.fit(X_train_hog_subset, y_train_subset)
-print("\n✓ Training selesai!")
+# Cek checkpoint
+try:
+    df_checkpoint = pd.read_csv(SAVE_FILE)
+    start_index = len(df_checkpoint)
+    y_true_all = df_checkpoint["y_true"].tolist()
+    y_pred_all = df_checkpoint["y_pred"].tolist()
+    print(f"\n✓ Resume from index {start_index}/{n_samples} ({start_index/n_samples*100:.1f}%)")
+except FileNotFoundError:
+    start_index = 0
+    y_true_all = []
+    y_pred_all = []
+    print(f"\n✓ Starting from scratch")
 
-# =====================================================
-# 7. EVALUASI MODEL
-# =====================================================
-print("\n" + "="*60)
-print("EVALUASI MODEL")
-print("="*60)
+# Inisialisasi LOOCV
+cv = LeaveOneOut()
+splits = list(cv.split(X_loocv))
 
-print("\nMelakukan prediksi pada data test...")
-y_pred = model.predict(X_test_hog)
+print(f"\nMemulai LOOCV dari iterasi {start_index}...")
+print(f"Checkpoint: setiap {BATCH_SIZE} iterasi\n")
 
-# Akurasi
-accuracy = accuracy_score(y_test, y_pred)
+start_time = time.time()
+
+# LOOCV Loop dengan progress bar
+for i in tqdm(range(start_index, len(splits)), 
+              total=len(splits), 
+              initial=start_index, 
+              desc="LOOCV",
+              unit="sample"):
+    
+    train_ix, test_ix = splits[i]
+    X_train_fold = X_loocv[train_ix]
+    X_test_fold = X_loocv[test_ix]
+    y_train_fold = y_loocv[train_ix]
+    y_test_fold = y_loocv[test_ix]
+    
+    # Train & predict
+    svm_clf.fit(X_train_fold, y_train_fold)
+    y_pred = svm_clf.predict(X_test_fold)
+    
+    y_true_all.append(y_test_fold[0])
+    y_pred_all.append(y_pred[0])
+    
+    # Checkpoint
+    if (i + 1) % BATCH_SIZE == 0:
+        pd.DataFrame({"y_true": y_true_all, "y_pred": y_pred_all}).to_csv(SAVE_FILE, index=False)
+
+# Save final
+pd.DataFrame({"y_true": y_true_all, "y_pred": y_pred_all}).to_csv(SAVE_FILE, index=False)
+
+total_time = time.time() - start_time
+print(f"\n✓ LOOCV selesai!")
+print(f"  Waktu: {total_time/60:.2f} menit")
+print(f"  Avg: {total_time/(n_samples-start_index):.3f} detik/sample")
+
+# Hasil LOOCV
+y_true = np.array(y_true_all)
+y_pred = np.array(y_pred_all)
+loocv_accuracy = accuracy_score(y_true, y_pred)
+
 print(f"\n{'='*60}")
-print(f"AKURASI MODEL: {accuracy * 100:.2f}%")
+print(f"HASIL LOOCV:")
+print(f"  Samples: {n_samples}")
+print(f"  Akurasi: {loocv_accuracy * 100:.2f}%")
 print(f"{'='*60}")
 
 # Classification Report
-print("\nClassification Report:")
-print(classification_report(y_test, y_pred, zero_division=0))
+def label_to_letter(label):
+    return chr(64 + int(label))
+
+target_names = [label_to_letter(i) for i in sorted(np.unique(y_loocv))]
+print("\nClassification Report (LOOCV):")
+print(classification_report(y_true, y_pred, target_names=target_names, zero_division=0))
 
 # Confusion Matrix
-print("\nMembuat Confusion Matrix...")
-cm = confusion_matrix(y_test, y_pred)
-
+cm_loocv = confusion_matrix(y_true, y_pred)
 plt.figure(figsize=(14, 12))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=True, 
-            square=True, linewidths=0.5)
-plt.title('Confusion Matrix - EMNIST HOG + SVM Classifier', fontsize=14, pad=20)
-plt.ylabel('True Label', fontsize=12)
-plt.xlabel('Predicted Label', fontsize=12)
+labels = [label_to_letter(i) for i in sorted(np.unique(y_loocv))]
+sns.heatmap(cm_loocv, annot=True, fmt='d', cmap='Greens', 
+            xticklabels=labels, yticklabels=labels, cbar=True)
+plt.title(f'Confusion Matrix - LOOCV (n={n_samples})', fontsize=14)
+plt.ylabel('True Label')
+plt.xlabel('Predicted Label')
 plt.tight_layout()
 plt.show()
 
 # =====================================================
-# 8. VISUALISASI HASIL PREDIKSI
-# =====================================================
-def visualize_predictions(X_test_original, y_test, y_pred, num_samples=10):
-    """Visualisasi beberapa prediksi"""
-    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
-    axes = axes.ravel()
-    
-    for i in range(min(num_samples, len(X_test_original))):
-        image = X_test_original[i].reshape(28, 28)
-        axes[i].imshow(image, cmap='gray')
-        
-        true_label = y_test[i]
-        pred_label = y_pred[i]
-        color = 'green' if true_label == pred_label else 'red'
-        
-        axes[i].set_title(f'True: {true_label}\nPred: {pred_label}', 
-                         color=color, fontsize=10, fontweight='bold')
-        axes[i].axis('off')
-    
-    plt.suptitle('Hasil Prediksi (Hijau = Benar, Merah = Salah)', 
-                 fontsize=14, y=1.02)
-    plt.tight_layout()
-    plt.show()
-
-print("\n" + "="*60)
-print("VISUALISASI HASIL PREDIKSI")
-print("="*60)
-visualize_predictions(X_test, y_test, y_pred, num_samples=10)
-
-# =====================================================
-# 9. ANALISIS ERROR
+# 4. EVALUASI TEST SET
 # =====================================================
 print("\n" + "="*60)
-print("ANALISIS ERROR")
+print("EVALUASI TEST SET")
 print("="*60)
 
-# Temukan prediksi yang salah
-incorrect_indices = np.where(y_test != y_pred)[0]
-print(f"\nJumlah prediksi salah: {len(incorrect_indices)}")
-print(f"Persentase error: {len(incorrect_indices)/len(y_test)*100:.2f}%")
+print(f"\nTraining final model dengan semua data ({len(X_train_hog)} samples)...")
+model_final = make_pipeline(
+    StandardScaler(), 
+    SVC(kernel='rbf', C=10, gamma=0.01)
+)
+model_final.fit(X_train_hog, y_train)
+print("✓ Training selesai!")
 
-if len(incorrect_indices) > 0:
-    print("\nMenampilkan 10 contoh prediksi yang salah...")
-    num_errors_to_show = min(10, len(incorrect_indices))
-    
-    fig, axes = plt.subplots(2, 5, figsize=(15, 6))
-    axes = axes.ravel()
-    
-    for i in range(num_errors_to_show):
-        idx = incorrect_indices[i]
-        image = X_test[idx].reshape(28, 28)
-        axes[i].imshow(image, cmap='gray')
-        axes[i].set_title(f'True: {y_test[idx]}\nPred: {y_pred[idx]}', 
-                         color='red', fontsize=10, fontweight='bold')
-        axes[i].axis('off')
-    
-    plt.suptitle('Contoh Prediksi yang Salah', fontsize=14, y=1.02, color='red')
-    plt.tight_layout()
-    plt.show()
+# Prediksi test set
+print("\nPrediksi test set...")
+y_pred_test = model_final.predict(X_test_hog)
+test_accuracy = accuracy_score(y_test, y_pred_test)
 
+print(f"\n{'='*60}")
+print(f"AKURASI TEST SET: {test_accuracy * 100:.2f}%")
+print(f"{'='*60}")
+
+# Classification Report Test Set
+target_names_test = [label_to_letter(i) for i in sorted(np.unique(y_train))]
+print("\nClassification Report (Test Set):")
+print(classification_report(y_test, y_pred_test, target_names=target_names_test, zero_division=0))
+
+# Confusion Matrix Test Set
+cm_test = confusion_matrix(y_test, y_pred_test)
+plt.figure(figsize=(14, 12))
+labels_test = [label_to_letter(i) for i in sorted(np.unique(y_train))]
+sns.heatmap(cm_test, annot=True, fmt='d', cmap='Blues', 
+            xticklabels=labels_test, yticklabels=labels_test, cbar=True)
+plt.title('Confusion Matrix - Test Set', fontsize=14)
+plt.ylabel('True Label')
+plt.xlabel('Predicted Label')
+plt.tight_layout()
+plt.show()
+
+# =====================================================
+# 5. RINGKASAN
+# =====================================================
 print("\n" + "="*60)
-print("✓ PROGRAM SELESAI!")
+print("RINGKASAN HASIL")
 print("="*60)
 
-# Informasi tambahan
-print("\nRingkasan:")
-print(f"  • Total data training: {len(X_train)}")
-print(f"  • Total data testing: {len(X_test)}")
-print(f"  • Jumlah kelas: {len(np.unique(y_train))}")
-print(f"  • Dimensi fitur HOG: {X_train_hog.shape[1]}")
-print(f"  • Akurasi model: {accuracy * 100:.2f}%")
+print(f"\nDataset:")
+print(f"  • Training: {len(X_train)} samples")
+print(f"  • Testing: {len(X_test)} samples")
+print(f"  • Classes: {len(np.unique(y_train))}")
+print(f"  • HOG features: {X_train_hog.shape[1]} dimensions")
+
+print(f"\nModel:")
+print(f"  • Algorithm: SVM (RBF kernel)")
+print(f"  • Parameters: C=10, gamma=0.01")
+
+print(f"\nLOOCV Results:")
+print(f"  • Samples: {n_samples}")
+print(f"  • Akurasi: {loocv_accuracy * 100:.2f}%")
+print(f"  • Waktu: {total_time/60:.2f} menit")
+
+print(f"\nTest Set Results:")
+print(f"  • Akurasi: {test_accuracy * 100:.2f}%")
+
+print(f"\n{'='*60}")
+if USE_LOOCV_SUBSET:
+    print(f"⚠️  LOOCV dilakukan pada subset {LOOCV_SUBSET_SIZE} samples")
+    print(f"    Set USE_LOOCV_SUBSET=False untuk full dataset")
+else:
+    print(f"✓  LOOCV dilakukan pada SEMUA data training")
+print(f"{'='*60}")
+
+print("\n✓ Program selesai!")
